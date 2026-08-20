@@ -3,6 +3,8 @@
 contrib/*.1
 rebuilder.key
 rebuilder.v2.key
+rebuilder.pqc.key
+rebuilderd.pqc.sign.key
 /worker/build/
 /worker/cache/
 /data/
