@@ -106,6 +106,8 @@ pub async fn submit_rebuild_report(
     cfg: web::Data<Config>,
     pool: web::Data<Pool>,
     request: web::Json<RebuildReport>,
+    private_key: web::Data<Arc<PrivateKey>>,
+    #[cfg(feature = "pqc")] pqc_private_key: web::Data<Arc<Option<PrivateKey>>>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
     if auth::worker(&cfg, &req, connection.as_mut()).is_err() {
@@ -122,6 +124,13 @@ pub async fn submit_rebuild_report(
     // enqueued build ID as well, so no need to add it later.
     let friends =
         get_build_input_friends(connection.as_mut(), queued.build_input_id).map_err(Error::from)?;
+
+    #[cfg_attr(not(feature = "pqc"), allow(unused_mut))]
+    let mut privkeys: Vec<&PrivateKey> = vec![&private_key];
+    #[cfg(feature = "pqc")]
+    if let Some(pqc_privkey) = pqc_private_key.as_ref().as_ref() {
+        privkeys.push(pqc_privkey);
+    }
 
     let encoded_log = if is_zstd_compressed(&report.build_log) {
         report.build_log
@@ -166,16 +175,32 @@ pub async fn submit_rebuild_report(
                         None::<Vec<u8>>
                     };
 
-                    let encoded_attestation =
-                        if let Some(attestation) = &artifact_report.attestation {
-                            Some(if is_zstd_compressed(attestation) {
-                                attestation.clone()
-                            } else {
-                                zstd_compress(&attestation[..]).await.map_err(Error::from)?
-                            })
+                    let encoded_attestation = if let Some(attestation) =
+                        &artifact_report.attestation
+                    {
+                        let bytes = if is_zstd_compressed(attestation) {
+                            attestation.clone()
                         } else {
-                            None::<Vec<u8>>
+                            zstd_compress(&attestation[..]).await.map_err(Error::from)?
                         };
+
+                        // Counter-sign here rather than on first read. A
+                        // post-quantum signature is only worth anything if
+                        // it exists before the classical algorithms fall,
+                        // and signing lazily leaves attestations nobody
+                        // happened to fetch in time unsigned forever.
+                        let bytes = if cfg.transparently_sign_attestations {
+                            attestation::compressed_attestation_sign_if_necessary(bytes, &privkeys)
+                                .await?
+                                .0
+                        } else {
+                            bytes
+                        };
+
+                        Some(bytes)
+                    } else {
+                        None::<Vec<u8>>
+                    };
 
                     let new_diffoscope_id = if let Some(encoded_diffoscope) = encoded_diffoscope {
                         let new_diffoscope_log = NewDiffoscopeLog {
