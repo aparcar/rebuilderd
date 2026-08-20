@@ -104,3 +104,19 @@ pub async fn get_public_key(
         "current": vec![public_key],
     })))
 }
+
+/// The public key needed to verify the daemon's post-quantum countersignature.
+#[cfg(feature = "pqc")]
+#[get("/pqc-public-key")]
+pub async fn get_pqc_public_key(
+    pqc_private_key: web::Data<Arc<Option<PrivateKey>>>,
+) -> web::Result<impl Responder> {
+    let Some(privkey) = pqc_private_key.as_ref().as_ref() else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    let public_key = crate::pqc::pubkey_to_pem(privkey.public())?;
+
+    Ok(HttpResponse::Ok().json(json!({
+        "current": vec![public_key],
+    })))
+}

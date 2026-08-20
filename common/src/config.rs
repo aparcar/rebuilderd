@@ -89,6 +89,7 @@ pub struct HttpConfig {
     pub real_ip_header: Option<String>,
     pub post_body_size_limit: Option<usize>,
     pub transparently_sign_attestations: Option<bool>,
+    pub transparently_pqc_sign_attestations: Option<bool>,
     pub endpoint: Option<String>,
 }
 

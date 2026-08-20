@@ -399,6 +399,7 @@ pub async fn get_build_artifact_attestation(
     path: web::Path<(i32, i32)>,
     cfg: web::Data<Config>,
     private_key: web::Data<Arc<PrivateKey>>,
+    #[cfg(feature = "pqc")] pqc_private_key: web::Data<Arc<Option<PrivateKey>>>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
 
@@ -416,11 +417,18 @@ pub async fn get_build_artifact_attestation(
     };
 
     if cfg.transparently_sign_attestations {
-        let (bytes, has_new_signature) = attestation::compressed_attestation_sign_if_necessary(
-            attestation.clone(),
-            &private_key,
-        )
-        .await?;
+        // The post-quantum signature is appended to the same metablock, so
+        // it is served, stored and transported by this path unchanged.
+        #[cfg_attr(not(feature = "pqc"), allow(unused_mut))]
+        let mut privkeys: Vec<&PrivateKey> = vec![&private_key];
+        #[cfg(feature = "pqc")]
+        if let Some(pqc_privkey) = pqc_private_key.as_ref().as_ref() {
+            privkeys.push(pqc_privkey);
+        }
+
+        let (bytes, has_new_signature) =
+            attestation::compressed_attestation_sign_if_necessary(attestation.clone(), &privkeys)
+                .await?;
 
         if has_new_signature {
             let attestation_id = rebuild_artifacts::table

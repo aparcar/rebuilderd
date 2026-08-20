@@ -19,8 +19,13 @@ pub struct Config {
     pub real_ip_header: Option<String>,
     pub post_body_size_limit: usize,
     pub transparently_sign_attestations: bool,
+    pub transparently_pqc_sign_attestations: bool,
+    /// Not read from the config file, this is populated from the commandline
+    pub pqc_signing_key: PathBuf,
     pub schedule: ScheduleConfig,
 }
+
+pub const DEFAULT_PQC_SIGNING_KEY: &str = "./rebuilderd.pqc.sign.key";
 
 pub fn from_struct(config: ConfigFile, auth_cookie: String) -> Result<Config> {
     let bind_addr = if let Ok(addr) = env::var("HTTP_ADDR") {
@@ -44,6 +49,11 @@ pub fn from_struct(config: ConfigFile, auth_cookie: String) -> Result<Config> {
             .http
             .transparently_sign_attestations
             .unwrap_or(true),
+        transparently_pqc_sign_attestations: config
+            .http
+            .transparently_pqc_sign_attestations
+            .unwrap_or(true),
+        pqc_signing_key: PathBuf::from(DEFAULT_PQC_SIGNING_KEY),
         schedule: config.schedule,
     })
 }

@@ -99,9 +99,13 @@ impl Attestation {
             .any(|sig| sig.key_id() == pubkey.key_id())
     }
 
-    pub fn sign(&mut self, privkey: &PrivateKey) -> Result<()> {
-        debug!("creating signature on attestation");
-        let new = Metablock::new(self.metablock.metadata.clone(), &[privkey])?;
+    /// Append a signature for each of `privkeys`.
+    ///
+    /// in-toto's `signatures` is a list, so an attestation can carry several
+    /// signatures over the same metadata -- e.g. an Ed25519 and an ML-DSA one.
+    pub fn sign(&mut self, privkeys: &[&PrivateKey]) -> Result<()> {
+        debug!("creating {} signature(s) on attestation", privkeys.len());
+        let new = Metablock::new(self.metablock.metadata.clone(), privkeys)?;
         self.metablock.signatures.extend(new.signatures);
         Ok(())
     }
@@ -125,11 +129,16 @@ impl Attestation {
     }
 }
 
-/// Makes sure the attestation is signed by our private key
-/// Returns true if a signature was created, returns false if attestation was already signed by us
+/// Makes sure the attestation is signed by each of our private keys
+///
+/// Keys that already have a signature on the attestation are skipped, so this
+/// is idempotent and back-fills lazily: enabling a new key later adds its
+/// signature on the next request without touching the existing ones.
+///
+/// Returns true if any signature was created.
 pub async fn compressed_attestation_sign_if_necessary(
     bytes: Vec<u8>,
-    privkey: &PrivateKey,
+    privkeys: &[&PrivateKey],
 ) -> Result<(Vec<u8>, bool)> {
     let decompressed = if is_zstd_compressed(&bytes) {
         let decompressed = zstd_decompress(&bytes).await.map_err(Error::from)?;
@@ -139,10 +148,16 @@ pub async fn compressed_attestation_sign_if_necessary(
     };
 
     let mut attestation = Attestation::parse(&decompressed)?;
-    if attestation.has_signature(privkey.public()) {
+    let missing = privkeys
+        .iter()
+        .copied()
+        .filter(|privkey| !attestation.has_signature(privkey.public()))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
         Ok((bytes, false))
     } else {
-        attestation.sign(privkey)?;
+        attestation.sign(&missing)?;
 
         let compressed = attestation.to_compressed_bytes().await?;
         Ok((compressed, true))
@@ -226,7 +241,7 @@ mod tests {
         assert!(!attestation.has_signature(pubkey));
 
         // append a signature with our key
-        attestation.sign(&privkey).unwrap();
+        attestation.sign(&[&privkey]).unwrap();
 
         // ensure it's valid now
         attestation.verify(1, [pubkey]).unwrap();

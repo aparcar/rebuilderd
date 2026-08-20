@@ -18,6 +18,10 @@ assets = [
     ["../contrib/systemd/rebuilderd.tmpfiles", "usr/lib/tmpfiles.d/rebuilderd.conf", "644"],
 ]
 
+[features]
+# post-quantum (ML-DSA-65) attestation countersignatures, per TAP 21
+pqc = ["in-toto/mldsa"]
+
 [dependencies]
 actix-web = "4.1.0"
 chrono = { version = "0.4.19", features = ["serde"] }

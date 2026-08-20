@@ -28,6 +28,13 @@ async fn main() -> Result<()> {
     if args.check_config {
         println!("{:#?}", config);
     } else if args.keygen {
+        #[cfg(feature = "pqc")]
+        let (privkey, pubkey) = if args.pqc {
+            rebuilderd::pqc::keygen_pem()?
+        } else {
+            attestation::keygen_pem()?
+        };
+        #[cfg(not(feature = "pqc"))]
         let (privkey, pubkey) = attestation::keygen_pem()?;
 
         println!("{}", privkey.trim_end());
@@ -35,6 +42,14 @@ async fn main() -> Result<()> {
     } else if let Some(path) = args.derive_pubkey {
         let privkey =
             fs::read(&path).with_context(|| anyhow!("Failed to read from file: {path:?}"))?;
+
+        #[cfg(feature = "pqc")]
+        if args.pqc {
+            let privkey = rebuilderd::pqc::pem_to_privkey(&privkey)?;
+            let pubkey = rebuilderd::pqc::pubkey_to_pem(privkey.public())?;
+            println!("{}", pubkey.trim_end());
+            return Ok(());
+        }
 
         for privkey in attestation::pem_to_privkeys(&privkey)? {
             let privkey = privkey?;
@@ -45,6 +60,13 @@ async fn main() -> Result<()> {
     } else {
         let privkey = attestation::load_or_create_privkey_pem(&args.signing_key)?;
         let pool = db::setup_pool("rebuilderd.db")?;
+
+        #[cfg(feature = "pqc")]
+        let config = {
+            let mut config = config;
+            config.pqc_signing_key = args.pqc_signing_key;
+            config
+        };
 
         let (server, address) = rebuilderd::build_server(pool, config, privkey)?;
 

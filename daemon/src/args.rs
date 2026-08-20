@@ -26,4 +26,16 @@ pub struct Args {
         default_value = "./rebuilderd.sign.key"
     )]
     pub signing_key: PathBuf,
+    /// Long-term post-quantum key used to counter-sign attestations
+    #[cfg(feature = "pqc")]
+    #[arg(
+        long,
+        env = "REBUILDERD_PQC_SIGNING_KEY",
+        default_value = rebuilderd::config::DEFAULT_PQC_SIGNING_KEY
+    )]
+    pub pqc_signing_key: PathBuf,
+    /// Operate on the post-quantum key instead, for --keygen and --derive-pubkey
+    #[cfg(feature = "pqc")]
+    #[arg(long)]
+    pub pqc: bool,
 }
