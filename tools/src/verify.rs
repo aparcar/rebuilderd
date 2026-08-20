@@ -117,6 +117,23 @@ pub fn verify(attestation: &[u8], known_keys: &[KnownKey]) -> Result<Vec<Signatu
     let metablock =
         serde_json::from_slice::<Metablock>(attestation).context("Failed to parse attestation")?;
 
+    // The signed message, reconstructed exactly as `Metablock::verify` does
+    // internally.
+    //
+    // We check each signature against its own key rather than calling
+    // `Metablock::verify` once per key. That method takes a threshold and a set
+    // of authorized keys, so a per-key call warns about every *other* signature
+    // as unauthorized -- which is quadratic and extremely noisy. It also
+    // iterates a HashMap and stops once the threshold is met, so which
+    // signatures it inspects, and therefore what it logs, varies between runs.
+    let raw = metablock
+        .metadata
+        .to_bytes()
+        .context("Failed to serialize attestation metadata")?;
+    let message = String::from_utf8(raw)
+        .context("Attestation metadata is not valid UTF-8")?
+        .replace("\\n", "\n");
+
     let mut reports = Vec::new();
     for signature in &metablock.signatures {
         let keyid = signature.key_id().prefix();
@@ -138,10 +155,7 @@ pub fn verify(attestation: &[u8], known_keys: &[KnownKey]) -> Result<Vec<Signatu
             continue;
         };
 
-        // `verify` takes a threshold and a set of authorized keys, so checking
-        // a single signature means asking for a threshold of one against a set
-        // containing only that key.
-        let verified = metablock.verify(1, [&known.pubkey]).is_ok();
+        let verified = known.pubkey.verify(message.as_bytes(), signature).is_ok();
 
         reports.push(SignatureReport {
             keyid,
@@ -255,5 +269,33 @@ mod tests {
 
         let pq = reports.iter().find(|r| r.is_post_quantum()).unwrap();
         assert_eq!(pq.scheme_name(), "ml-dsa-65/1");
+    }
+
+    /// Regression: results must not depend on iteration order.
+    ///
+    /// Verifying via `Metablock::verify` once per key made the output depend on
+    /// HashMap ordering, so identical invocations logged differently from run
+    /// to run. Each signature is now checked against its own key.
+    #[test]
+    fn is_deterministic_with_mixed_known_and_unknown_keys() {
+        let known_a = ed25519_key();
+        let unknown_a = ed25519_key();
+        let unknown_b = ed25519_key();
+
+        let attestation = attestation(&[&unknown_a, &known_a, &unknown_b], "rebuild");
+        let keys = [known(&known_a)];
+
+        let first = verify(&attestation, &keys).unwrap();
+        assert_eq!(first.len(), 3);
+        assert_eq!(first.iter().filter(|r| r.verified).count(), 1);
+        assert_eq!(first.iter().filter(|r| r.owner.is_none()).count(), 2);
+
+        // Same input, same output, every time.
+        for _ in 0..16 {
+            let again = verify(&attestation, &keys).unwrap();
+            let a: Vec<_> = first.iter().map(|r| (&r.keyid, r.verified)).collect();
+            let b: Vec<_> = again.iter().map(|r| (&r.keyid, r.verified)).collect();
+            assert_eq!(a, b, "verification results varied between runs");
+        }
     }
 }
