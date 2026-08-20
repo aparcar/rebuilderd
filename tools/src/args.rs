@@ -57,6 +57,8 @@ pub enum Pkgs {
     Diffoscope(PkgsDiffoscope),
     /// Access the attestation of the last rebuild (if there is any)
     Attestation(PkgsAttestation),
+    /// Verify the signatures on the attestation of the last rebuild
+    Verify(PkgsVerify),
 }
 
 #[derive(Debug, Parser)]
@@ -161,6 +163,15 @@ pub struct PkgsDiffoscope {
 pub struct PkgsAttestation {
     #[command(flatten)]
     pub filter: PkgsFilter,
+}
+
+#[derive(Debug, Parser)]
+pub struct PkgsVerify {
+    #[command(flatten)]
+    pub filter: PkgsFilter,
+    /// Fail unless a post-quantum signature verified
+    #[arg(long)]
+    pub require_pqc: bool,
 }
 
 #[derive(Debug, Parser)]
