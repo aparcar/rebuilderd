@@ -7,11 +7,15 @@
 //! actually trust -- so the report distinguishes them rather than collapsing
 //! everything into a single boolean.
 
-use in_toto::crypto::{PublicKey, SignatureScheme};
-use in_toto::models::Metablock;
+use crate::args::PinnedKeys;
+use in_toto::crypto::{HashAlgorithm, HashValue, PublicKey, SignatureScheme};
+use in_toto::models::{Metablock, MetadataWrapper};
 use rebuilderd_common::api::Client;
 use rebuilderd_common::api::v1::MetaRestApi;
 use rebuilderd_common::errors::*;
+use std::collections::HashMap;
+use std::fs::File;
+use std::path::Path;
 
 /// A public key the daemon publishes, with a label for reporting.
 pub struct KnownKey {
@@ -110,6 +114,99 @@ fn parse_pubkeys(buf: &[u8], scheme: SignatureScheme) -> Result<Vec<PublicKey>> 
                 .context("Failed to parse public key")
         })
         .collect()
+}
+
+/// Load the public keys the caller pinned on the command line.
+///
+/// Keys are labelled `pinned` rather than `daemon`, because that is the whole
+/// point: their authority comes from the caller having archived them, not from
+/// the instance being checked vouching for itself.
+pub fn load_pinned_keys(keys: &PinnedKeys) -> Result<Vec<KnownKey>> {
+    let mut loaded = Vec::new();
+
+    for path in &keys.key {
+        let buf = std::fs::read(path).with_context(|| format!("Failed to read {:?}", path))?;
+        for pubkey in parse_pubkeys(&buf, SignatureScheme::Ed25519)? {
+            loaded.push(KnownKey {
+                pubkey,
+                owner: "pinned",
+            });
+        }
+    }
+
+    #[cfg(feature = "pqc")]
+    for path in &keys.pqc_key {
+        let buf = std::fs::read(path).with_context(|| format!("Failed to read {:?}", path))?;
+        for pubkey in parse_pubkeys(&buf, SignatureScheme::MlDsa65V1)? {
+            loaded.push(KnownKey {
+                pubkey,
+                owner: "pinned",
+            });
+        }
+    }
+
+    #[cfg(not(feature = "pqc"))]
+    if !keys.pqc_key.is_empty() {
+        bail!("This build has no post-quantum support, rebuild with --features pqc");
+    }
+
+    Ok(loaded)
+}
+
+/// What an attestation claims about a specific artifact.
+pub struct ProductClaim {
+    pub name: String,
+    pub hashes: HashMap<HashAlgorithm, HashValue>,
+}
+
+/// Read the `products` of an attestation -- the artifacts it makes claims about.
+pub fn products(attestation: &[u8]) -> Result<Vec<ProductClaim>> {
+    let metablock =
+        serde_json::from_slice::<Metablock>(attestation).context("Failed to parse attestation")?;
+
+    let MetadataWrapper::Link(link) = metablock.metadata else {
+        bail!("Attestation is a layout, not a link; it makes no artifact claims");
+    };
+
+    Ok(link
+        .products
+        .into_iter()
+        .map(|(path, hashes)| ProductClaim {
+            name: path.to_string(),
+            hashes,
+        })
+        .collect())
+}
+
+/// Hash a file with the algorithms in-toto records.
+pub fn hash_file(path: &Path) -> Result<HashMap<HashAlgorithm, HashValue>> {
+    let file = File::open(path).with_context(|| format!("Failed to open {:?}", path))?;
+    let (_size, hashes) =
+        in_toto::crypto::calculate_hashes(file, &[HashAlgorithm::Sha256, HashAlgorithm::Sha512])
+            .context("Failed to hash artifact")?;
+    Ok(hashes)
+}
+
+/// Whether the file's digests match what the attestation claims.
+///
+/// Every algorithm the attestation records must be present and equal. A claim
+/// listing an algorithm we did not compute is a mismatch, not something to
+/// quietly skip -- otherwise an attestation could weaken the check by naming
+/// only algorithms the verifier ignores.
+pub fn hashes_match(
+    claim: &HashMap<HashAlgorithm, HashValue>,
+    actual: &HashMap<HashAlgorithm, HashValue>,
+) -> bool {
+    if claim.is_empty() {
+        return false;
+    }
+
+    claim.iter().all(|(alg, expected)| {
+        actual
+            .get(alg)
+            .map(|got| got.value() == expected.value())
+            .unwrap_or(false)
+    })
 }
 
 /// Check every signature on an attestation against the keys we know about.
@@ -297,5 +394,61 @@ mod tests {
             let b: Vec<_> = again.iter().map(|r| (&r.keyid, r.verified)).collect();
             assert_eq!(a, b, "verification results varied between runs");
         }
+    }
+
+    #[test]
+    fn hashes_match_requires_every_claimed_algorithm() {
+        let sha256 = HashValue::new(vec![1, 2, 3]);
+        let sha512 = HashValue::new(vec![4, 5, 6]);
+
+        let claim: HashMap<_, _> = [
+            (HashAlgorithm::Sha256, sha256.clone()),
+            (HashAlgorithm::Sha512, sha512.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        let both: HashMap<_, _> = claim.clone();
+        assert!(hashes_match(&claim, &both));
+
+        // an algorithm we did not compute must not be silently skipped
+        let only_256: HashMap<_, _> = [(HashAlgorithm::Sha256, sha256.clone())]
+            .into_iter()
+            .collect();
+        assert!(!hashes_match(&claim, &only_256));
+
+        // one matching algorithm is not enough if another disagrees
+        let wrong_512: HashMap<_, _> = [
+            (HashAlgorithm::Sha256, sha256),
+            (HashAlgorithm::Sha512, HashValue::new(vec![9, 9, 9])),
+        ]
+        .into_iter()
+        .collect();
+        assert!(!hashes_match(&claim, &wrong_512));
+    }
+
+    /// An attestation claiming nothing must never validate a file.
+    #[test]
+    fn hashes_match_rejects_an_empty_claim() {
+        let actual: HashMap<_, _> = [(HashAlgorithm::Sha256, HashValue::new(vec![1]))]
+            .into_iter()
+            .collect();
+        assert!(!hashes_match(&HashMap::new(), &actual));
+    }
+
+    #[test]
+    fn hash_file_agrees_with_the_recorded_digests() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"rebuilt artifact").unwrap();
+
+        let hashes = hash_file(file.path()).unwrap();
+
+        // sha256("rebuilt artifact"), computed with shasum(1), not by this code
+        assert_eq!(
+            data_encoding::HEXLOWER.encode(hashes[&HashAlgorithm::Sha256].value()),
+            "1f1c5907df3a85c818a574b67bb1c2fa654604d09deba7f147396e6c0553ca5f"
+        );
     }
 }

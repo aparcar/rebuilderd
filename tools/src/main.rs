@@ -341,7 +341,11 @@ async fn main() -> Result<()> {
                 .await
                 .context("Failed to fetch attestation")?;
 
-            let known_keys = verify::fetch_known_keys(&client).await?;
+            let known_keys = if args.keys.is_pinned() {
+                verify::load_pinned_keys(&args.keys)?
+            } else {
+                verify::fetch_known_keys(&client).await?
+            };
             let reports = verify::verify(&attestation, &known_keys)?;
 
             println!(
@@ -508,6 +512,83 @@ async fn main() -> Result<()> {
                 .with_auth_cookie()?
                 .drop_queued_jobs(Some(&origin_filter), Some(&source_identity_filter))
                 .await?;
+        }
+        SubCommand::VerifyArtifact(args) => {
+            // Deliberately offline. The daemon is never consulted, so nothing
+            // it -- or anything impersonating it -- could say affects the
+            // outcome.
+            if !args.keys.is_pinned() {
+                bail!("No keys given; pass --pqc-key and/or --key");
+            }
+            let known_keys = verify::load_pinned_keys(&args.keys)?;
+
+            let attestation = std::fs::read(&args.attestation)
+                .with_context(|| anyhow!("Failed to read {:?}", args.attestation))?;
+            let attestation = if utils::is_zstd_compressed(&attestation) {
+                utils::zstd_decompress(&attestation).await?
+            } else {
+                attestation
+            };
+
+            let reports = verify::verify(&attestation, &known_keys)?;
+            let post_quantum = reports.iter().any(|r| r.verified && r.is_post_quantum());
+            let classical = reports.iter().any(|r| r.verified && !r.is_post_quantum());
+
+            println!("{}", args.artifact.display());
+            println!("  signatures:");
+            for report in &reports {
+                let verdict = if report.verified {
+                    "ok".green()
+                } else if report.owner.is_none() {
+                    "unknown key".yellow()
+                } else {
+                    "INVALID".red()
+                };
+                println!(
+                    "    {:<10} {:<14} {:<8} {}",
+                    report.keyid,
+                    report.scheme_name(),
+                    report.owner.unwrap_or("-"),
+                    verdict,
+                );
+            }
+
+            if !classical && !post_quantum {
+                bail!("No signature could be verified against the given keys");
+            }
+            if args.require_pqc && !post_quantum {
+                bail!("No post-quantum signature verified");
+            }
+
+            // Hashing the file only means something once the claims about it
+            // are known to be authentic.
+            let actual = verify::hash_file(&args.artifact)?;
+            let products = verify::products(&attestation)?;
+
+            let matched = products
+                .iter()
+                .find(|product| verify::hashes_match(&product.hashes, &actual));
+
+            println!();
+            match matched {
+                Some(product) => {
+                    println!("  matches product {:?}", product.name);
+                    println!();
+                    let summary = if post_quantum {
+                        "verified (post-quantum)".green()
+                    } else {
+                        "verified (classical only)".yellow()
+                    };
+                    println!("  {}", summary);
+                }
+                None => {
+                    println!("  attestation covers:");
+                    for product in &products {
+                        println!("    {}", product.name);
+                    }
+                    bail!("This file does not match any product in the attestation");
+                }
+            }
         }
         SubCommand::Completions(completions) => args::gen_completions(&completions)?,
     }

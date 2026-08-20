@@ -2191,6 +2191,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "tar",
+ "tempfile",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tree_magic_mini",

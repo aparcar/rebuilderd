@@ -48,4 +48,5 @@ xz2 = "0.1"
 zstd = { version = "0.13", features = ["pkg-config"] }
 
 [dev-dependencies]
+tempfile = "3"
 data-encoding = "2"
