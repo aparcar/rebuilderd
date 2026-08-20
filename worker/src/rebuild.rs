@@ -26,6 +26,21 @@ pub struct Context<'a> {
     pub build: config::Build,
     pub diffoscope: config::Diffoscope,
     pub privkey: &'a PrivateKey,
+    /// Post-quantum key co-signing the link, alongside `privkey`.
+    #[cfg(feature = "pqc")]
+    pub pqc_privkey: &'a PrivateKey,
+}
+
+/// Append a post-quantum signature to a link the worker has already signed.
+///
+/// `in_toto_run` signs with a single key, so the second signature is added
+/// afterwards. in-toto's `signatures` is a list, so the link carries both and a
+/// break of either algorithm leaves the other binding.
+#[cfg(feature = "pqc")]
+fn append_pqc_signature(link: &mut in_toto::models::Metablock, privkey: &PrivateKey) -> Result<()> {
+    let pqc = in_toto::models::Metablock::new(link.metadata.clone(), &[privkey])?;
+    link.signatures.extend(pqc.signatures);
+    Ok(())
 }
 
 fn path_to_string(path: &Path) -> Result<String> {
@@ -206,6 +221,19 @@ pub async fn rebuild(
                 Ok(signed_link) => {
                     info!("Signed link generated");
 
+                    // in_toto_run signs with a single key, so the post-quantum
+                    // signature is appended here. in-toto's `signatures` is a
+                    // list, so the link ends up carrying both -- a break of
+                    // either algorithm leaves the other binding.
+                    #[cfg(feature = "pqc")]
+                    let signed_link = {
+                        let mut signed_link = signed_link;
+                        append_pqc_signature(&mut signed_link, ctx.pqc_privkey)
+                            .context("Failed to create post-quantum link signature")?;
+                        info!("Post-quantum link signature generated");
+                        signed_link
+                    };
+
                     let attestation = serde_json::to_string(&signed_link)
                         .context("Failed to serialize attestation")?;
 
@@ -322,5 +350,83 @@ mod tests {
             .await
             .unwrap();
         assert!(!equal);
+    }
+}
+
+#[cfg(all(test, feature = "pqc"))]
+mod pqc_tests {
+    use super::*;
+    use in_toto::crypto::{KeyType, SignatureScheme};
+    use in_toto::models::{LinkMetadataBuilder, Metablock, MetadataWrapper};
+
+    const PQC_SCHEME: SignatureScheme = SignatureScheme::MlDsa65V1;
+
+    fn ed25519_key() -> PrivateKey {
+        let der = PrivateKey::new(KeyType::Ed25519).unwrap();
+        PrivateKey::from_pkcs8(&der, SignatureScheme::Ed25519).unwrap()
+    }
+
+    fn mldsa_key() -> PrivateKey {
+        let der = PrivateKey::new_mldsa(PQC_SCHEME).unwrap();
+        PrivateKey::from_pkcs8(&der, PQC_SCHEME).unwrap()
+    }
+
+    fn link(privkey: &PrivateKey) -> Metablock {
+        let metadata = MetadataWrapper::Link(
+            LinkMetadataBuilder::new()
+                .name("rebuild example_1.0_all.deb".to_string())
+                .build()
+                .unwrap(),
+        );
+        Metablock::new(metadata, &[privkey]).unwrap()
+    }
+
+    /// The worker's link must end up carrying a classical *and* a post-quantum
+    /// signature, each verifying on its own.
+    #[test]
+    fn appends_a_second_signature() {
+        let classical = ed25519_key();
+        let pqc = mldsa_key();
+
+        let mut link = link(&classical);
+        assert_eq!(link.signatures.len(), 1);
+
+        append_pqc_signature(&mut link, &pqc).unwrap();
+        assert_eq!(link.signatures.len(), 2);
+
+        link.verify(1, [classical.public()])
+            .expect("ed25519 signature still verifies alone");
+        link.verify(1, [pqc.public()])
+            .expect("ml-dsa signature verifies alone");
+        link.verify(2, [classical.public(), pqc.public()])
+            .expect("both verify together");
+    }
+
+    /// Appending must not disturb the signature that was already there.
+    #[test]
+    fn does_not_invalidate_the_existing_signature() {
+        let classical = ed25519_key();
+        let mut link = link(&classical);
+        let before = link.signatures[0].clone();
+
+        append_pqc_signature(&mut link, &mldsa_key()).unwrap();
+
+        assert_eq!(link.signatures[0], before);
+    }
+
+    #[test]
+    fn survives_a_json_roundtrip() {
+        let classical = ed25519_key();
+        let pqc = mldsa_key();
+
+        let mut link = link(&classical);
+        append_pqc_signature(&mut link, &pqc).unwrap();
+
+        let json = serde_json::to_string(&link).unwrap();
+        let parsed: Metablock = serde_json::from_str(&json).unwrap();
+
+        parsed
+            .verify(2, [classical.public(), pqc.public()])
+            .expect("both signatures survive serialisation");
     }
 }
