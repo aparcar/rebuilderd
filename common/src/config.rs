@@ -122,12 +122,16 @@ pub struct WorkerConfig {
     #[serde(default)]
     pub authorized_workers: Vec<String>,
     pub signup_secret: Option<String>,
+    pub require_signed_attestations: Option<bool>,
 }
 
 impl WorkerConfig {
     pub fn update(&mut self, c: WorkerConfig) {
         if !c.authorized_workers.is_empty() {
             self.authorized_workers = c.authorized_workers;
+        }
+        if c.require_signed_attestations.is_some() {
+            self.require_signed_attestations = c.require_signed_attestations;
         }
         if c.signup_secret.is_some() {
             self.signup_secret = c.signup_secret;

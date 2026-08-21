@@ -1,3 +1,4 @@
+use data_encoding::BASE64;
 use in_toto::{
     crypto::{KeyType, PrivateKey, PublicKey, SignatureScheme},
     models::{Metablock, MetadataWrapper},
@@ -106,6 +107,35 @@ impl Attestation {
         Ok(())
     }
 
+    /// Check whether `pubkey` has a valid signature on this attestation.
+    ///
+    /// Unlike `verify`, this inspects only the signature belonging to `pubkey`.
+    /// `Metablock::verify` takes a threshold and a *set* of authorized keys, so
+    /// asking it about one key makes it log every other signature as
+    /// unauthorized.
+    pub fn check_signature(&self, pubkey: &PublicKey) -> Result<SignatureCheck> {
+        let Some(signature) = self
+            .metablock
+            .signatures
+            .iter()
+            .find(|sig| sig.key_id() == pubkey.key_id())
+        else {
+            return Ok(SignatureCheck::Missing);
+        };
+
+        // The signed message, as `Metablock` constructs it.
+        let raw = self.metablock.metadata.to_bytes()?;
+        let message = String::from_utf8(raw)
+            .context("Attestation metadata is not valid UTF-8")?
+            .replace("\\n", "\n");
+
+        if pubkey.verify(message.as_bytes(), signature).is_ok() {
+            Ok(SignatureCheck::Valid)
+        } else {
+            Ok(SignatureCheck::Invalid)
+        }
+    }
+
     pub fn verify<'a, I>(&self, threshold: u32, authorized_keys: I) -> Result<MetadataWrapper>
     where
         I: IntoIterator<Item = &'a PublicKey>,
@@ -123,6 +153,56 @@ impl Attestation {
         let compressed = zstd_compress(json.as_bytes()).await?;
         Ok(compressed)
     }
+}
+
+/// Whether a given key has signed an attestation, and whether that signature
+/// holds.
+///
+/// "No signature from this key" and "a signature that does not verify" are very
+/// different situations -- the first is a worker that predates signing, the
+/// second is a forgery or a bug -- so they are not collapsed into a bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureCheck {
+    /// The attestation carries no signature from this key.
+    Missing,
+    /// A signature from this key is present but does not verify.
+    Invalid,
+    /// A signature from this key is present and verifies.
+    Valid,
+}
+
+/// Reconstruct a worker's in-toto public key from the form it registers with.
+///
+/// A worker's identity is `BASE64(raw ed25519 public key)`, and it signs with a
+/// key loaded through `PrivateKey::from_pkcs8`, which attaches the
+/// python-securesystemslib compatible `keyid_hash_algorithms`. The keyid is a
+/// hash over those fields, so they have to be reproduced here exactly or the
+/// reconstructed key gets a different keyid and matches nothing.
+pub fn worker_pubkey(key: &str) -> Result<PublicKey> {
+    let bytes = BASE64
+        .decode(key.as_bytes())
+        .context("Worker key is not valid base64")?;
+
+    PublicKey::from_ed25519_with_keyid_hash_algorithms(
+        bytes,
+        Some(vec!["sha256".to_string(), "sha512".to_string()]),
+    )
+    .context("Failed to parse worker key as ed25519")
+}
+
+/// Check a possibly zstd-compressed attestation for a valid signature by `pubkey`.
+pub async fn check_compressed_attestation_signature(
+    bytes: &[u8],
+    pubkey: &PublicKey,
+) -> Result<SignatureCheck> {
+    let decompressed = if is_zstd_compressed(bytes) {
+        Cow::Owned(zstd_decompress(bytes).await.map_err(Error::from)?)
+    } else {
+        Cow::Borrowed(bytes)
+    };
+
+    let attestation = Attestation::parse(&decompressed)?;
+    attestation.check_signature(pubkey)
 }
 
 /// Makes sure the attestation is signed by our private key
@@ -252,5 +332,102 @@ mod tests {
         -----END PUBLIC KEY-----\r\n\
         "
         );
+    }
+
+    fn worker_key() -> (PrivateKey, String) {
+        // Exactly what worker/src/auth.rs does.
+        let der = PrivateKey::new(KeyType::Ed25519).unwrap();
+        let privkey = PrivateKey::from_pkcs8(&der, SignatureScheme::Ed25519).unwrap();
+        let registered = BASE64.encode(privkey.public().as_bytes());
+        (privkey, registered)
+    }
+
+    fn attestation_signed_by(privkey: &PrivateKey) -> Attestation {
+        let metadata = MetadataWrapper::Link(LinkMetadata {
+            name: "rebuild example_1.0_all.deb".to_string(),
+            materials: Default::default(),
+            products: Default::default(),
+            env: None,
+            byproducts: Default::default(),
+            command: vec![].into(),
+        });
+        Attestation {
+            metablock: Metablock::new(metadata, &[privkey]).unwrap(),
+        }
+    }
+
+    /// The keyid is a hash over keytype, scheme, keyval *and*
+    /// keyid_hash_algorithms. The worker signs with a key loaded through
+    /// `from_pkcs8`, which sets the python-sslib compatible value, so
+    /// reconstructing without it yields a different keyid that silently matches
+    /// no signature at all.
+    #[test]
+    fn test_worker_pubkey_keyid_matches_the_signing_key() {
+        let (privkey, registered) = worker_key();
+
+        assert_eq!(
+            worker_pubkey(&registered).unwrap().key_id(),
+            privkey.public().key_id(),
+            "reconstructed worker key has a different keyid than the signing key"
+        );
+    }
+
+    #[test]
+    fn test_check_signature_valid() {
+        let (privkey, registered) = worker_key();
+        let attestation = attestation_signed_by(&privkey);
+
+        assert_eq!(
+            attestation
+                .check_signature(&worker_pubkey(&registered).unwrap())
+                .unwrap(),
+            SignatureCheck::Valid
+        );
+    }
+
+    /// A key that never signed is "missing", not "invalid" -- the daemon treats
+    /// those differently.
+    #[test]
+    fn test_check_signature_missing() {
+        let (privkey, _) = worker_key();
+        let (_, other_registered) = worker_key();
+        let attestation = attestation_signed_by(&privkey);
+
+        assert_eq!(
+            attestation
+                .check_signature(&worker_pubkey(&other_registered).unwrap())
+                .unwrap(),
+            SignatureCheck::Missing
+        );
+    }
+
+    /// A signature over different metadata must be reported as invalid rather
+    /// than quietly passing.
+    #[test]
+    fn test_check_signature_invalid() {
+        let (privkey, registered) = worker_key();
+        let mut attestation = attestation_signed_by(&privkey);
+
+        attestation.metablock.metadata = MetadataWrapper::Link(LinkMetadata {
+            name: "rebuild something_else.deb".to_string(),
+            materials: Default::default(),
+            products: Default::default(),
+            env: None,
+            byproducts: Default::default(),
+            command: vec![].into(),
+        });
+
+        assert_eq!(
+            attestation
+                .check_signature(&worker_pubkey(&registered).unwrap())
+                .unwrap(),
+            SignatureCheck::Invalid
+        );
+    }
+
+    #[test]
+    fn test_worker_pubkey_rejects_garbage() {
+        assert!(worker_pubkey("not a key").is_err());
+        assert!(worker_pubkey(&BASE64.encode(b"too short")).is_err());
     }
 }

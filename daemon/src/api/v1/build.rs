@@ -29,7 +29,7 @@ use rebuilderd_common::api::v1::{
     BuildStatus, OriginFilter, Page, Priority, Rebuild, RebuildReport, ResultPage,
     SourceIdentityFilter,
 };
-use rebuilderd_common::errors::Error;
+use rebuilderd_common::errors::{Error, debug, warn};
 use rebuilderd_common::utils::{is_zstd_compressed, zstd_compress};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -109,11 +109,78 @@ pub async fn submit_rebuild_report(
     private_key: web::Data<Arc<PrivateKey>>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
-    if auth::worker(&cfg, &req, connection.as_mut()).is_err() {
+    let Ok(worker) = auth::worker(&cfg, &req, connection.as_mut()) else {
         return Ok(HttpResponse::Forbidden());
-    }
+    };
 
     let report = request.into_inner();
+
+    // Check the worker actually signed what it is reporting, before anything is
+    // written and before we add our own signature alongside it. Authentication
+    // only proves the sender knows a registered worker key -- which is a
+    // *public* key, so it is not a secret. The signature is the only evidence
+    // of possession of the corresponding private key.
+    //
+    // Done as a pass over the whole report rather than per artifact further
+    // down, so a rejected report leaves nothing behind: the build log is
+    // inserted before the artifact loop.
+    let require_signed = cfg.worker.require_signed_attestations.unwrap_or(false);
+
+    // A key we cannot parse means we cannot check anything -- which is a reason
+    // to decline to vouch for the report, not to fail the request.
+    let worker_pubkey = match attestation::worker_pubkey(&worker.key) {
+        Ok(pubkey) => Some(pubkey),
+        Err(err) => {
+            warn!(
+                "Cannot check attestations from worker {:?}, its key does not parse: {:#}",
+                worker.name, err
+            );
+            None
+        }
+    };
+
+    for artifact_report in &report.artifacts {
+        let Some(bytes) = &artifact_report.attestation else {
+            continue;
+        };
+
+        let check = match &worker_pubkey {
+            Some(pubkey) => attestation::check_compressed_attestation_signature(bytes, pubkey)
+                .await
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Could not read attestation for {:?} from worker {:?}: {:#}",
+                        artifact_report.name, worker.name, err
+                    );
+                    attestation::SignatureCheck::Missing
+                }),
+            None => attestation::SignatureCheck::Missing,
+        };
+
+        match check {
+            attestation::SignatureCheck::Valid => (),
+            attestation::SignatureCheck::Invalid => {
+                warn!(
+                    "Rejecting report: attestation for {:?} has an invalid signature by worker {:?}",
+                    artifact_report.name, worker.name
+                );
+                return Ok(HttpResponse::Forbidden());
+            }
+            attestation::SignatureCheck::Missing => {
+                if require_signed {
+                    warn!(
+                        "Rejecting report: attestation for {:?} is not signed by worker {:?}",
+                        artifact_report.name, worker.name
+                    );
+                    return Ok(HttpResponse::Forbidden());
+                }
+                debug!(
+                    "Attestation for {:?} is not signed by worker {:?}, accepting anyway",
+                    artifact_report.name, worker.name
+                );
+            }
+        }
+    }
     let queued = queue::table
         .filter(queue::id.is(report.queue_id))
         .get_result::<Queued>(connection.as_mut())
