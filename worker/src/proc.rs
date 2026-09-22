@@ -1,8 +1,8 @@
+use crate::log;
 use futures_util::FutureExt;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use rebuilderd_common::errors::*;
-use std::cmp;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
@@ -11,66 +11,42 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::select;
 use tokio::time;
 
 const SIGKILL_DELAY: u64 = 10;
 
 pub struct Options {
     pub timeout: Duration,
-    pub size_limit: Option<usize>,
     pub kill_at_size_limit: bool,
     pub passthrough: bool,
     pub envs: HashMap<String, String>,
 }
 
 pub struct Capture<'a> {
-    output: &'a mut Vec<u8>,
+    output: &'a mut log::Buffer,
     timeout: Duration,
-    size_limit: Option<usize>,
     kill_at_size_limit: bool,
     start: Instant,
     sigterm_sent: Option<Instant>,
-    truncated: bool,
 }
 
-pub fn capture(output: &mut Vec<u8>, opts: Options) -> Capture<'_> {
+pub fn capture(output: &mut log::Buffer, opts: Options) -> Capture<'_> {
     let start = Instant::now();
     Capture {
         output,
         timeout: opts.timeout,
-        size_limit: opts.size_limit,
         kill_at_size_limit: opts.kill_at_size_limit,
         start,
         sigterm_sent: None,
-        truncated: false,
     }
 }
 
 impl Capture<'_> {
-    pub async fn push_bytes(&mut self, child: &mut Child, mut slice: &[u8]) -> Result<()> {
-        if !self.truncated {
-            if let Some(size_limit) = &self.size_limit {
-                let n = cmp::min(size_limit - self.output.len(), slice.len());
-                if n < 1 {
-                    warn!(
-                        "Exceeding output limit: output={}, slice={}, limit={}",
-                        self.output.len(),
-                        slice.len(),
-                        size_limit
-                    );
-                    let msg = format!("TRUNCATED DUE TO SIZE LIMIT: {} bytes", size_limit);
-                    self.truncate(child, &msg, self.kill_at_size_limit).await?;
-                    return Ok(());
-                } else {
-                    // truncate to stay within the limit
-                    slice = &slice[..n];
-                }
-            }
-
-            self.output.extend(slice);
+    pub async fn push_bytes(&mut self, child: &mut Child, slice: &[u8]) -> Result<()> {
+        if let log::Status::Truncated(size_limit) = self.output.push_bytes(slice) {
+            let msg = format!("TRUNCATED DUE TO SIZE LIMIT: {} bytes", size_limit);
+            self.truncate(child, &msg, self.kill_at_size_limit).await?;
         }
-
         Ok(())
     }
 
@@ -90,8 +66,7 @@ impl Capture<'_> {
             self.sigterm_sent = Some(Instant::now());
         }
 
-        self.output.extend(format!("\n\n{}\n\n", reason).as_bytes());
-        self.truncated = true;
+        self.output.truncate(reason);
         Ok(())
     }
 
@@ -134,7 +109,7 @@ impl Capture<'_> {
     }
 }
 
-pub async fn run<I, S>(bin: &Path, args: I, opts: Options, log: &mut Vec<u8>) -> Result<bool>
+pub async fn run<I, S>(bin: &Path, args: I, opts: Options, log: &mut log::Buffer) -> Result<bool>
 where
     I: IntoIterator<Item = S> + fmt::Debug,
     S: AsRef<OsStr>,
@@ -179,7 +154,7 @@ where
             .await?;
 
         if stdout_open || stderr_open {
-            select! {
+            tokio::select! {
                 n = child_stdout.read(&mut buf_stdout).fuse() => {
                     let n = n?;
                     trace!("read stdout: {}", n);
@@ -207,7 +182,7 @@ where
                 _ = time::sleep(remaining).fuse() => continue,
             }
         } else {
-            select! {
+            tokio::select! {
                 status = child.wait().fuse() => {
                     let status = status?;
                     info!("{:?} exited with exit={}, captured {} bytes", bin, status, log.len());
@@ -225,13 +200,18 @@ where
 mod tests {
     use super::*;
 
-    async fn script(script: &str, opts: Options) -> Result<(bool, String, Duration)> {
+    async fn script(
+        script: &str,
+        opts: Options,
+        front_size_limit: Option<usize>,
+        tail_size_limit: Option<usize>,
+    ) -> Result<(bool, String, Duration)> {
         let start = Instant::now();
         let path = Path::new("sh");
-        let mut output = Vec::new();
+        let mut output = log::Buffer::new(front_size_limit, tail_size_limit);
         let success = run(path, &["-c", script], opts, &mut output).await?;
         let duration = start.elapsed();
-        let output = String::from_utf8_lossy(&output).into_owned();
+        let output = output.make_string();
         Ok((success, output, duration))
     }
 
@@ -241,11 +221,12 @@ mod tests {
             "/bin/echo hello world",
             Options {
                 timeout: Duration::from_secs(600),
-                size_limit: None,
                 kill_at_size_limit: false,
                 passthrough: false,
                 envs: HashMap::new(),
             },
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -263,11 +244,12 @@ mod tests {
         ",
             Options {
                 timeout: Duration::from_secs(600),
-                size_limit: Some(50),
                 kill_at_size_limit: false,
                 passthrough: false,
                 envs: HashMap::new(),
             },
+            Some(50),
+            Some(0),
         )
         .await
         .unwrap();
@@ -283,31 +265,32 @@ mod tests {
         let (success, output, duration) = script(
             "
         for x in `seq 100`; do
-            /bin/echo AAAAAAAAAAAAAAAAAAAAAAAA
+            /bin/echo AAAAABBBBBCCCCCDDDDDEEE
             sleep 0.5
         done
         ",
             Options {
                 timeout: Duration::from_secs(600),
-                size_limit: Some(50),
                 kill_at_size_limit: true,
                 passthrough: false,
                 envs: HashMap::new(),
             },
+            Some(50),
+            None,
         )
         .await
         .unwrap();
         assert!(!success);
         assert_eq!(
             output,
-            "AAAAAAAAAAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAAAAAAA\n\n\nTRUNCATED DUE TO SIZE LIMIT: 50 bytes\n\n"
+            "AAAAABBBBBCCCCCDDDDDEEE\nAAAAABBBBBCCCCCDDDDDEEE\nAA\n\nTRUNCATED DUE TO SIZE LIMIT: 50 bytes\n\nAAABBBBBCCCCCDDDDDEEE\n"
         );
         assert!(duration > Duration::from_secs(1));
         assert!(duration < Duration::from_secs(5));
     }
 
     #[tokio::test]
-    async fn timeout() {
+    async fn timeout_kill() {
         let (success, output, duration) = script(
             "
         for x in `seq 100`; do
@@ -317,11 +300,12 @@ mod tests {
         ",
             Options {
                 timeout: Duration::from_millis(1500),
-                size_limit: None,
                 kill_at_size_limit: false,
                 passthrough: false,
                 envs: HashMap::new(),
             },
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -345,11 +329,12 @@ mod tests {
         ",
             Options {
                 timeout: Duration::from_millis(1500),
-                size_limit: Some(50),
                 kill_at_size_limit: false,
                 passthrough: false,
                 envs: HashMap::new(),
             },
+            Some(50),
+            Some(0),
         )
         .await
         .unwrap();

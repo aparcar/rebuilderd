@@ -2,6 +2,7 @@ use crate::config;
 use crate::diffoscope::diffoscope;
 use crate::download::download;
 use crate::heartbeat::HeartBeat;
+use crate::log;
 use crate::proc;
 use in_toto::crypto::PrivateKey;
 use in_toto::runlib::in_toto_run;
@@ -10,13 +11,13 @@ use rebuilderd_common::errors::Context as _;
 use rebuilderd_common::errors::*;
 use rebuilderd_common::utils::zstd_compress;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio::select;
 use tokio::time;
 
 pub struct Context<'a> {
@@ -97,12 +98,12 @@ pub async fn compare_files(a: &Path, b: &Path) -> Result<bool> {
 
 pub async fn rebuild_with_heartbeat(
     ctx: &Context<'_>,
-    log: &mut Vec<u8>,
+    log: &mut log::Buffer,
     hb: &dyn HeartBeat,
 ) -> Result<Vec<RebuildArtifactReport>> {
     let mut rebuild = Box::pin(rebuild(ctx, log));
     loop {
-        select! {
+        tokio::select! {
             res = &mut rebuild => {
                 return res;
             },
@@ -111,7 +112,10 @@ pub async fn rebuild_with_heartbeat(
     }
 }
 
-pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<RebuildArtifactReport>> {
+pub async fn rebuild(
+    ctx: &Context<'_>,
+    log: &mut log::Buffer,
+) -> Result<Vec<RebuildArtifactReport>> {
     // setup
     let tmp = tempfile::Builder::new().prefix("rebuilderd").tempdir()?;
 
@@ -136,21 +140,21 @@ pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<Rebuild
         artifacts.push((artifact.clone(), artifact_filename, artifact_path));
     }
 
-    let input_filename = if let Some(input_url) = &ctx.input_url {
-        download(input_url, &inputs_dir)
+    let (input_filename, input_url) = if let Some(input_url) = &ctx.input_url {
+        let filename = download(input_url, &inputs_dir)
             .await
-            .with_context(|| anyhow!("Failed to download build input from {:?}", input_url))?
+            .with_context(|| anyhow!("Failed to download build input from {:?}", input_url))?;
+        (filename, input_url.clone())
     } else {
-        artifacts
+        let (artifact, filename, _) = artifacts
             .first()
-            .context("Failed to use first artifact as build input")?
-            .1
-            .to_owned()
+            .context("Failed to use first artifact as build input")?;
+        (filename.to_owned(), artifact.url.clone())
     };
     let input_path = inputs_dir.join(&input_filename);
 
     // rebuild
-    verify(ctx, log, &out_dir, &input_path).await?;
+    verify(ctx, log, &out_dir, &input_path, &input_url).await?;
 
     // process results
     let mut results = Vec::new();
@@ -249,9 +253,10 @@ pub async fn rebuild(ctx: &Context<'_>, log: &mut Vec<u8>) -> Result<Vec<Rebuild
 
 async fn verify(
     ctx: &Context<'_>,
-    log: &mut Vec<u8>,
+    log: &mut log::Buffer,
     out_dir: &Path,
     input_path: &Path,
+    input_url: &str,
 ) -> Result<()> {
     let bin = &ctx.backend.path;
     let timeout = ctx.build.timeout.unwrap_or(3600 * 24); // 24h
@@ -261,13 +266,16 @@ async fn verify(
 
     let opts = proc::Options {
         timeout: Duration::from_secs(timeout),
-        size_limit: ctx.build.max_bytes,
         kill_at_size_limit: false,
         passthrough: !ctx.build.silent,
         envs,
     };
 
-    proc::run(bin.as_ref(), &[input_path], opts, log).await?;
+    // Backends are invoked as `<backend> <path> <url>`: the downloaded build
+    // input and the URL it was fetched from, so backends whose input isn't
+    // self-describing can recover build identity from the URL.
+    let args = [input_path.as_os_str(), OsStr::new(input_url)];
+    proc::run(bin.as_ref(), &args, opts, log).await?;
 
     Ok(())
 }

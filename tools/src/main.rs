@@ -6,6 +6,7 @@ use clap::Parser;
 use colored::*;
 use env_logger::Env;
 use glob::Pattern;
+use num_format::{Locale, ToFormattedString};
 use rebuilderd_common::api::Client;
 use rebuilderd_common::api::v1::{
     ArtifactStatus, BinaryIdentityFilter, BinaryPackage, BuildRestApi, OriginFilter, PackageReport,
@@ -54,6 +55,8 @@ pub async fn sync(client: &Client, sync: PkgsSync) -> Result<()> {
         "archlinux" => schedule::archlinux::sync(&http, &sync).await?,
         "debian" => schedule::debian::sync(&http, &sync).await?,
         "fedora" => schedule::fedora::sync(&http, &sync).await?,
+        "openwrt-package" => schedule::openwrt::sync_package(&http, &sync).await?,
+        "openwrt-image" => schedule::openwrt::sync_image(&http, &sync).await?,
         "tails" => schedule::tails::sync(&http, &sync).await?,
         unknown => bail!(
             "No integrated sync for {:?}, use --sync-method or `pkgs sync-stdin` instead",
@@ -394,19 +397,22 @@ async fn main() -> Result<()> {
             }
         }
         SubCommand::Queue(Queue::Push(push)) => {
-            client
+            let success = client
                 .with_auth_cookie()?
                 .request_rebuild(QueueJobRequest {
                     distribution: Some(push.distro),
                     release: None, // TODO: push.release
                     component: Some(push.component),
-                    name: Some(push.name),
+                    name: push.name,
                     version: push.version,
                     architecture: push.architecture,
                     status: None, // TODO: push.status
                     priority: Some(Priority::from(push.priority)),
                 })
                 .await?;
+
+            let affected = success.affected.to_formatted_string(&Locale::en);
+            println!("Queue operation applied to {affected} builds");
         }
         SubCommand::Queue(Queue::Delete(push)) => {
             let origin_filter = OriginFilter {
