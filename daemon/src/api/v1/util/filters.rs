@@ -1,4 +1,4 @@
-use crate::schema::source_packages;
+use crate::schema::{binary_packages, source_packages};
 use diesel::backend::Backend;
 use diesel::dsl::sql;
 use diesel::expression::is_aggregate::No;
@@ -228,7 +228,8 @@ where
         };
 
         // This is only correct when using OriginFilter for source packages,
-        // when filtering for binary packages, this gives you unexpected results
+        // when filtering for binary packages, additionally apply
+        // binary_component_filter to match the binary package's own component
         let component_is: Self::Output = match self.component {
             Some(component) => Box::new(
                 sql::<Bool>(
@@ -253,6 +254,22 @@ where
                 .and(component_is)
                 .and(architecture_is),
         )
+    }
+}
+
+/// Matches binary packages by their own component. The component check of
+/// [`IntoOriginFilter`] only asks whether the source package has any binary
+/// package with that component, which lets through every binary package of a
+/// source package whose binary packages span several components.
+pub fn binary_component_filter<T: 'static>(
+    component: Option<String>,
+) -> Box<dyn BoxableExpression<T, Sqlite, SqlType = Bool>>
+where
+    binary_packages::component: SelectableExpression<T>,
+{
+    match component {
+        Some(component) => Box::new(binary_packages::component.is(component)),
+        None => Box::new(AsExpression::<Bool>::as_expression(true)),
     }
 }
 

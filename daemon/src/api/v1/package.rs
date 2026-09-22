@@ -1,6 +1,7 @@
 use crate::api::v1::util::auth;
 use crate::api::v1::util::filters::{
     IntoBinaryIdentityFilter, IntoFilter, IntoOriginFilter, IntoSourceIdentityFilter,
+    binary_component_filter,
 };
 use crate::api::v1::util::friends::{
     build_input_friends, get_largest_retry_count_among_friends, has_queued_friend,
@@ -486,6 +487,7 @@ pub async fn get_binary_packages(
                 .into_inner()
                 .into_filter(binary_packages::architecture),
         )
+        .filter(binary_component_filter(origin_filter.component.clone()))
         .filter(binary_identity_filter.clone().into_inner().into_filter(
             binary_packages::name,
             binary_packages::version,
@@ -503,6 +505,7 @@ pub async fn get_binary_packages(
                 .into_inner()
                 .into_filter(binary_packages::architecture),
         )
+        .filter(binary_component_filter(origin_filter.component.clone()))
         .filter(freshness_filter.into_inner().into_filter())
         .filter(binary_identity_filter.clone().into_inner().into_filter(
             binary_packages::name,

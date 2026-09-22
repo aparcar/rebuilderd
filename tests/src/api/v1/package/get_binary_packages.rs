@@ -209,6 +209,42 @@ pub async fn returns_result_for_matching_origin_filter(
 }
 
 #[rstest]
+#[case(DUMMY_COMPONENT, DUMMY_MULTI_ARTIFACT_BINARY_PACKAGE_1)]
+#[case(DUMMY_OTHER_COMPONENT, DUMMY_MULTI_ARTIFACT_BINARY_PACKAGE_2)]
+#[tokio::test]
+pub async fn filters_by_component_of_each_artifact(
+    mut isolated_server: IsolatedServer,
+    #[case] component: &str,
+    #[case] expected_name: &str,
+) {
+    isolated_server
+        .client
+        .submit_package_report(&single_package_with_multiple_components_report())
+        .await
+        .unwrap();
+
+    let origin_filter = OriginFilter {
+        distribution: None,
+        release: None,
+        component: Some(component.to_string()),
+        architecture: None,
+    };
+
+    let page = isolated_server
+        .client
+        .get_binary_packages(None, Some(&origin_filter), None)
+        .await
+        .unwrap();
+
+    assert_eq!(1, page.total);
+    assert_eq!(1, page.records.len());
+    assert_eq!(expected_name, page.records[0].name);
+    assert_eq!(Some(component), page.records[0].component.as_deref());
+
+    isolated_server.shutdown().await;
+}
+
+#[rstest]
 #[case(BinaryIdentityFilter{
         name: Some(DUMMY_MULTI_ARTIFACT_BINARY_PACKAGE_1.to_string()),
         version: None,

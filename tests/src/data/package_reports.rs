@@ -69,6 +69,12 @@ pub fn single_package_with_multiple_artifacts_report() -> PackageReport {
     }
 }
 
+pub fn single_package_with_multiple_components_report() -> PackageReport {
+    let mut report = single_package_with_multiple_artifacts_report();
+    report.packages[0].artifacts[1].component = Some(DUMMY_OTHER_COMPONENT.to_string());
+    report
+}
+
 pub fn single_package_report_from_different_distribution() -> PackageReport {
     PackageReport {
         distribution: DUMMY_OTHER_DISTRIBUTION.to_string(),
