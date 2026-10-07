@@ -1523,6 +1523,7 @@ checksum = "277ff51754a3f68f12f58446c5d006aa8baa4914ea273cce24a599cfaff33d4f"
 [[package]]
 name = "in-toto"
 version = "0.4.0"
+source = "git+https://github.com/aparcar/in-toto-rs?rev=1d9c57f1456b8efbc7b6d12ee7d90283dc289bd1#1d9c57f1456b8efbc7b6d12ee7d90283dc289bd1"
 dependencies = [
  "chrono",
  "data-encoding",
