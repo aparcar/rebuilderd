@@ -14,6 +14,8 @@ pub mod code_migrations;
 pub mod config;
 pub mod db;
 pub mod models;
+#[cfg(feature = "pqc")]
+pub mod pqc;
 pub mod schema;
 pub mod web;
 
@@ -26,13 +28,26 @@ pub fn build_server(
 
     let privkey = Arc::new(privkey);
 
+    // Loaded once at startup rather than per request; `None` means the daemon
+    // adds no post-quantum countersignature.
+    #[cfg(feature = "pqc")]
+    let pqc_privkey = Arc::new(if config.transparently_pqc_sign_attestations {
+        Some(pqc::load_or_create_privkey_pem(&config.pqc_signing_key)?)
+    } else {
+        None
+    });
+
     let server = HttpServer::new(move || {
         let json_config = JsonConfig::default().limit(config.post_body_size_limit);
 
         let v0_dashboard_cache = Arc::new(RwLock::new(api::v0::DashboardState::new()));
 
-        App::new()
-            .wrap(Logger::default())
+        #[cfg(feature = "pqc")]
+        let app = App::new().app_data(Data::new(pqc_privkey.clone()));
+        #[cfg(not(feature = "pqc"))]
+        let app = App::new();
+
+        app.wrap(Logger::default())
             .wrap(middleware::Compress::default())
             .wrap(middleware::NormalizePath::new(TrailingSlash::Trim))
             .app_data(json_config)
@@ -74,14 +89,17 @@ pub fn build_server(
                                     .service(api::v1::get_build_artifact_attestation),
                             )
                             .service(scope("/dashboard").service(api::v1::get_dashboard))
-                            .service(
-                                scope("/meta")
+                            .service({
+                                let meta = scope("/meta")
                                     .service(api::v1::get_distributions)
                                     .service(api::v1::get_distribution_releases)
                                     .service(api::v1::get_distribution_architectures)
                                     .service(api::v1::get_distribution_release_architectures)
-                                    .service(api::v1::get_public_key),
-                            )
+                                    .service(api::v1::get_public_key);
+                                #[cfg(feature = "pqc")]
+                                let meta = meta.service(api::v1::get_pqc_public_key);
+                                meta
+                            })
                             .service(
                                 scope("/packages")
                                     .service(api::v1::submit_package_report)

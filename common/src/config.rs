@@ -89,6 +89,7 @@ pub struct HttpConfig {
     pub real_ip_header: Option<String>,
     pub post_body_size_limit: Option<usize>,
     pub transparently_sign_attestations: Option<bool>,
+    pub transparently_pqc_sign_attestations: Option<bool>,
     pub endpoint: Option<String>,
 }
 
@@ -122,12 +123,19 @@ pub struct WorkerConfig {
     #[serde(default)]
     pub authorized_workers: Vec<String>,
     pub signup_secret: Option<String>,
+    /// Reject rebuild reports whose attestation is not signed by the
+    /// submitting worker. Off by default: workers predating attestation
+    /// signing would otherwise stop being able to report.
+    pub require_signed_attestations: Option<bool>,
 }
 
 impl WorkerConfig {
     pub fn update(&mut self, c: WorkerConfig) {
         if !c.authorized_workers.is_empty() {
             self.authorized_workers = c.authorized_workers;
+        }
+        if c.require_signed_attestations.is_some() {
+            self.require_signed_attestations = c.require_signed_attestations;
         }
         if c.signup_secret.is_some() {
             self.signup_secret = c.signup_secret;

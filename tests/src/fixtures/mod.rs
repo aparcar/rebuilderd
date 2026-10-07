@@ -96,6 +96,13 @@ pub fn isolated_server(
 
         let pool = db::setup_pool(database_path.to_str().unwrap()).unwrap();
 
+        #[cfg(feature = "pqc")]
+        let config = {
+            let mut config = config;
+            config.pqc_signing_key = tmp_dir.path().join("rebuilderd.pqc.sign.key");
+            config
+        };
+
         let mut server = ServerHolder::new(pool.clone(), config, private_key).unwrap();
         server.start().unwrap();
 

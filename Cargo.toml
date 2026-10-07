@@ -8,6 +8,13 @@ members = [
 ]
 resolver = "2"
 
+# TEMPORARY: the `pqc` feature needs ML-DSA support in in-toto-rs, which is not
+# released yet (in-toto/in-toto-rs#123, #124). Pinned to a rev on the fork's
+# `dsse-mldsa` branch, never a branch name, so builds stay reproducible. Drop
+# once upstream merges and releases.
+[patch.crates-io]
+in-toto = { git = "https://github.com/aparcar/in-toto-rs", rev = "1d9c57f1456b8efbc7b6d12ee7d90283dc289bd1" }
+
 [workspace.dependencies]
 rand = "0.10"
 rebuilderd = { version = "=0.28.0", path = "daemon" }

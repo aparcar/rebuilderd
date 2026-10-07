@@ -20,6 +20,24 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  pqc:
+    name: build (pqc)
+    runs-on: ubuntu-latest
+    env:
+      FEATURES: rebuilderd/pqc,rebuilderd-worker/pqc,rebuildctl/pqc,rebuilderd-tests/pqc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: sudo apt-get install libsodium-dev libsqlite3-dev libzstd-dev
+      - name: Build
+        run: cargo build --verbose --locked --features "$FEATURES"
+      - name: Run tests
+        run: cargo test --verbose --features "$FEATURES"
+      - name: Run clippy
+        run: cargo clippy --all --lib --tests --features "$FEATURES"
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

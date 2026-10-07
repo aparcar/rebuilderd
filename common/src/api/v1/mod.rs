@@ -130,6 +130,9 @@ pub trait MetaRestApi {
     ) -> Result<Vec<String>>;
 
     async fn get_public_keys(&self) -> Result<PublicKey>;
+
+    /// The public key for the daemon's post-quantum countersignature
+    async fn get_pqc_public_keys(&self) -> Result<PublicKey>;
 }
 
 #[async_trait]
@@ -374,6 +377,18 @@ impl MetaRestApi for Client {
     async fn get_public_keys(&self) -> Result<PublicKey> {
         let public_key = self
             .get(Cow::Borrowed("api/v1/meta/public-keys"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(public_key)
+    }
+
+    async fn get_pqc_public_keys(&self) -> Result<PublicKey> {
+        let public_key = self
+            .get(Cow::Borrowed("api/v1/meta/pqc-public-key"))
             .send()
             .await?
             .error_for_status()?

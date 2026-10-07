@@ -29,7 +29,7 @@ use rebuilderd_common::api::v1::{
     BuildStatus, OriginFilter, Page, Priority, Rebuild, RebuildReport, ResultPage,
     SourceIdentityFilter,
 };
-use rebuilderd_common::errors::Error;
+use rebuilderd_common::errors::{Error, debug, warn};
 use rebuilderd_common::utils::{is_zstd_compressed, zstd_compress};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -106,13 +106,80 @@ pub async fn submit_rebuild_report(
     cfg: web::Data<Config>,
     pool: web::Data<Pool>,
     request: web::Json<RebuildReport>,
+    private_key: web::Data<Arc<PrivateKey>>,
+    #[cfg(feature = "pqc")] pqc_private_key: web::Data<Arc<Option<PrivateKey>>>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
-    if auth::worker(&cfg, &req, connection.as_mut()).is_err() {
+    let Ok(worker) = auth::worker(&cfg, &req, connection.as_mut()) else {
         return Ok(HttpResponse::Forbidden());
-    }
+    };
 
     let report = request.into_inner();
+
+    // Check the worker actually signed what it is reporting, before anything is
+    // written. Authentication only proves the sender knows a registered worker
+    // key -- which is a *public* key, so it is not a secret. The signature is
+    // the only evidence of possession of the corresponding private key.
+    //
+    // Only the worker's Ed25519 signature can be checked: its ML-DSA key is
+    // never sent to the daemon, so there is nothing to check it against yet.
+    let require_signed = cfg.worker.require_signed_attestations.unwrap_or(false);
+
+    // A key we cannot parse means we cannot check anything -- which is a reason
+    // to decline to vouch for the report, not to fail the request.
+    let worker_pubkey = match attestation::worker_pubkey(&worker.key) {
+        Ok(pubkey) => Some(pubkey),
+        Err(err) => {
+            warn!(
+                "Cannot check attestations from worker {:?}, its key does not parse: {:#}",
+                worker.name, err
+            );
+            None
+        }
+    };
+
+    for artifact_report in &report.artifacts {
+        let Some(bytes) = &artifact_report.attestation else {
+            continue;
+        };
+
+        let check = match &worker_pubkey {
+            Some(pubkey) => attestation::check_compressed_attestation_signature(bytes, pubkey)
+                .await
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Could not read attestation for {:?} from worker {:?}: {:#}",
+                        artifact_report.name, worker.name, err
+                    );
+                    attestation::SignatureCheck::Missing
+                }),
+            None => attestation::SignatureCheck::Missing,
+        };
+
+        match check {
+            attestation::SignatureCheck::Valid => (),
+            attestation::SignatureCheck::Invalid => {
+                warn!(
+                    "Rejecting report: attestation for {:?} has an invalid signature by worker {:?}",
+                    artifact_report.name, worker.name
+                );
+                return Ok(HttpResponse::Forbidden());
+            }
+            attestation::SignatureCheck::Missing => {
+                if require_signed {
+                    warn!(
+                        "Rejecting report: attestation for {:?} is not signed by worker {:?}",
+                        artifact_report.name, worker.name
+                    );
+                    return Ok(HttpResponse::Forbidden());
+                }
+                debug!(
+                    "Attestation for {:?} is not signed by worker {:?}, accepting anyway",
+                    artifact_report.name, worker.name
+                );
+            }
+        }
+    }
     let queued = queue::table
         .filter(queue::id.is(report.queue_id))
         .get_result::<Queued>(connection.as_mut())
@@ -122,6 +189,13 @@ pub async fn submit_rebuild_report(
     // enqueued build ID as well, so no need to add it later.
     let friends =
         get_build_input_friends(connection.as_mut(), queued.build_input_id).map_err(Error::from)?;
+
+    #[cfg_attr(not(feature = "pqc"), allow(unused_mut))]
+    let mut privkeys: Vec<&PrivateKey> = vec![&private_key];
+    #[cfg(feature = "pqc")]
+    if let Some(pqc_privkey) = pqc_private_key.as_ref().as_ref() {
+        privkeys.push(pqc_privkey);
+    }
 
     let encoded_log = if is_zstd_compressed(&report.build_log) {
         report.build_log
@@ -166,16 +240,32 @@ pub async fn submit_rebuild_report(
                         None::<Vec<u8>>
                     };
 
-                    let encoded_attestation =
-                        if let Some(attestation) = &artifact_report.attestation {
-                            Some(if is_zstd_compressed(attestation) {
-                                attestation.clone()
-                            } else {
-                                zstd_compress(&attestation[..]).await.map_err(Error::from)?
-                            })
+                    let encoded_attestation = if let Some(attestation) =
+                        &artifact_report.attestation
+                    {
+                        let bytes = if is_zstd_compressed(attestation) {
+                            attestation.clone()
                         } else {
-                            None::<Vec<u8>>
+                            zstd_compress(&attestation[..]).await.map_err(Error::from)?
                         };
+
+                        // Counter-sign here rather than on first read. A
+                        // post-quantum signature is only worth anything if
+                        // it exists before the classical algorithms fall,
+                        // and signing lazily leaves attestations nobody
+                        // happened to fetch in time unsigned forever.
+                        let bytes = if cfg.transparently_sign_attestations {
+                            attestation::compressed_attestation_sign_if_necessary(bytes, &privkeys)
+                                .await?
+                                .0
+                        } else {
+                            bytes
+                        };
+
+                        Some(bytes)
+                    } else {
+                        None::<Vec<u8>>
+                    };
 
                     let new_diffoscope_id = if let Some(encoded_diffoscope) = encoded_diffoscope {
                         let new_diffoscope_log = NewDiffoscopeLog {
@@ -399,6 +489,7 @@ pub async fn get_build_artifact_attestation(
     path: web::Path<(i32, i32)>,
     cfg: web::Data<Config>,
     private_key: web::Data<Arc<PrivateKey>>,
+    #[cfg(feature = "pqc")] pqc_private_key: web::Data<Arc<Option<PrivateKey>>>,
 ) -> web::Result<impl Responder> {
     let mut connection = pool.get().map_err(Error::from)?;
 
@@ -416,11 +507,18 @@ pub async fn get_build_artifact_attestation(
     };
 
     if cfg.transparently_sign_attestations {
-        let (bytes, has_new_signature) = attestation::compressed_attestation_sign_if_necessary(
-            attestation.clone(),
-            &private_key,
-        )
-        .await?;
+        // The post-quantum signature is appended to the same metablock, so
+        // it is served, stored and transported by this path unchanged.
+        #[cfg_attr(not(feature = "pqc"), allow(unused_mut))]
+        let mut privkeys: Vec<&PrivateKey> = vec![&private_key];
+        #[cfg(feature = "pqc")]
+        if let Some(pqc_privkey) = pqc_private_key.as_ref().as_ref() {
+            privkeys.push(pqc_privkey);
+        }
+
+        let (bytes, has_new_signature) =
+            attestation::compressed_attestation_sign_if_necessary(attestation.clone(), &privkeys)
+                .await?;
 
         if has_new_signature {
             let attestation_id = rebuild_artifacts::table

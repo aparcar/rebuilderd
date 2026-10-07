@@ -37,8 +37,24 @@ pub enum SubCommand {
     /// Queue related subcommands
     #[command(subcommand)]
     Queue(Queue),
+    /// Check a local file against a signed attestation, offline
+    VerifyArtifact(VerifyArtifact),
     /// Generate shell completions
     Completions(Completions),
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyArtifact {
+    /// The file to check
+    pub artifact: PathBuf,
+    /// The attestation covering it, as served by `.../attestation`
+    #[arg(long, value_name = "PATH")]
+    pub attestation: PathBuf,
+    #[command(flatten)]
+    pub keys: PinnedKeys,
+    /// Fail unless a post-quantum signature verified
+    #[arg(long)]
+    pub require_pqc: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -57,6 +73,8 @@ pub enum Pkgs {
     Diffoscope(PkgsDiffoscope),
     /// Access the attestation of the last rebuild (if there is any)
     Attestation(PkgsAttestation),
+    /// Verify the signatures on the attestation of the last rebuild
+    Verify(PkgsVerify),
 }
 
 #[derive(Debug, Parser)]
@@ -161,6 +179,40 @@ pub struct PkgsDiffoscope {
 pub struct PkgsAttestation {
     #[command(flatten)]
     pub filter: PkgsFilter,
+}
+
+#[derive(Debug, Parser)]
+pub struct PkgsVerify {
+    #[command(flatten)]
+    pub filter: PkgsFilter,
+    /// Fail unless a post-quantum signature verified
+    #[arg(long)]
+    pub require_pqc: bool,
+    #[command(flatten)]
+    pub keys: PinnedKeys,
+}
+
+/// Public keys supplied by the caller instead of fetched from the daemon.
+///
+/// Fetching the key from the instance you are checking is fine as a smoke test
+/// and useless as a trust decision: whoever can serve you metadata can serve
+/// you the key it was signed with. For a verification that has to survive the
+/// classical algorithms breaking, the key must be one archived beforehand.
+#[derive(Debug, Parser)]
+pub struct PinnedKeys {
+    /// Verify against this ed25519 public key (PEM) instead of fetching it
+    #[arg(long, value_name = "PATH")]
+    pub key: Vec<PathBuf>,
+    /// Verify against this post-quantum public key (PEM) instead of fetching it
+    #[arg(long, value_name = "PATH")]
+    pub pqc_key: Vec<PathBuf>,
+}
+
+impl PinnedKeys {
+    /// Whether the caller pinned anything. If so, nothing is fetched.
+    pub fn is_pinned(&self) -> bool {
+        !self.key.is_empty() || !self.pqc_key.is_empty()
+    }
 }
 
 #[derive(Debug, Parser)]

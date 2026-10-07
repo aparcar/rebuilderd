@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use clap::Parser;
 use env_logger::Env;
-use in_toto::crypto::PrivateKey;
 use rebuilderd_common::api::Client;
 use rebuilderd_common::api::v1::{
     ArtifactStatus, BuildRestApi, BuildStatus, JobAssignment, PopQueuedJobRequest, QueueRestApi,
@@ -53,7 +52,11 @@ impl heartbeat::HeartBeat for HttpHeartBeat<'_> {
     }
 }
 
-async fn rebuild(client: &Client, privkey: &PrivateKey, config: &config::ConfigFile) -> Result<()> {
+async fn rebuild(
+    client: &Client,
+    profile: &auth::Profile,
+    config: &config::ConfigFile,
+) -> Result<()> {
     info!("Requesting work from rebuilderd...");
     let supported_backends = config.backends.keys().map(String::from).collect::<Vec<_>>();
 
@@ -92,7 +95,9 @@ async fn rebuild(client: &Client, privkey: &PrivateKey, config: &config::ConfigF
                 backend,
                 build: config.build.clone(),
                 diffoscope: config.diffoscope.clone(),
-                privkey,
+                privkey: &profile.privkey,
+                #[cfg(feature = "pqc")]
+                pqc_privkey: &profile.pqc_privkey,
             };
 
             let hb = HttpHeartBeat {
@@ -154,11 +159,11 @@ async fn rebuild(client: &Client, privkey: &PrivateKey, config: &config::ConfigF
 
 async fn run_worker_loop(
     client: &Client,
-    privkey: &PrivateKey,
+    profile: &auth::Profile,
     config: &config::ConfigFile,
 ) -> Result<()> {
     loop {
-        if let Err(err) = rebuild(client, privkey, config).await {
+        if let Err(err) = rebuild(client, profile, config).await {
             error!(
                 "Unexpected error, sleeping for {}s: {:#}",
                 API_ERROR_DELAY, err
@@ -230,7 +235,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("Failed to register worker with rebuilderd daemon")?;
 
-            run_worker_loop(&client, &profile.privkey, &config).await?;
+            run_worker_loop(&client, &profile, &config).await?;
         }
         // this is only really for debugging
         SubCommand::Build(build) => {
@@ -266,6 +271,8 @@ async fn main() -> Result<()> {
                     build: config.build,
                     diffoscope,
                     privkey: &profile.privkey,
+                    #[cfg(feature = "pqc")]
+                    pqc_privkey: &profile.pqc_privkey,
                 },
                 &mut log,
             )

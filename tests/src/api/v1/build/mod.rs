@@ -1,6 +1,8 @@
 mod get_build;
 mod get_build_artifact;
 mod get_build_artifact_attestation;
+#[cfg(feature = "pqc")]
+mod get_build_artifact_attestation_pqc;
 mod get_build_artifact_diffoscope;
 mod get_build_artifacts;
 mod get_build_log;

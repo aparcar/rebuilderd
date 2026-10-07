@@ -17,6 +17,10 @@ assets = [
     ["../contrib/systemd/rebuilderd-worker@.service", "usr/lib/systemd/system/", "640"],
 ]
 
+[features]
+# post-quantum (ML-DSA-65) link signatures, per TAP 21
+pqc = ["in-toto/mldsa"]
+
 [dependencies]
 async-trait = "0.1.56"
 clap = { version = "4", features = ["derive", "env"] }
