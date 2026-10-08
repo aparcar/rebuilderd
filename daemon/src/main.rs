@@ -4,6 +4,7 @@ use crate::args::Args;
 use clap::Parser;
 use env_logger::Env;
 use rebuilderd::attestation;
+use rebuilderd::cleanup;
 use rebuilderd::config;
 use rebuilderd::db;
 use rebuilderd_common::errors::*;
@@ -45,6 +46,10 @@ async fn main() -> Result<()> {
     } else {
         let privkey = attestation::load_or_create_privkey_pem(&args.signing_key)?;
         let pool = db::setup_pool("rebuilderd.db")?;
+
+        if config.cleanup.is_enabled() {
+            cleanup::spawn(pool.clone(), config.cleanup.clone());
+        }
 
         let (server, address) = rebuilderd::build_server(pool, config, privkey)?;
 

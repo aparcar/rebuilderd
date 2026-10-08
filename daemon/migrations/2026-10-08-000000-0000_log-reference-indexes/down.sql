@@ -1,0 +1,3 @@
+DROP INDEX rebuilds_build_log_id_idx;
+DROP INDEX rebuild_artifacts_diffoscope_log_id_idx;
+DROP INDEX rebuild_artifacts_attestation_log_id_idx;

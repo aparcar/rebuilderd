@@ -68,6 +68,24 @@ _retry_delay_base=_
 	recommended to set this to a high value like 168 (1 week) or higher.
 	Successful rebuilds are not retried.
 
+## [cleanup]
+
+Automatically delete old rebuilds together with their build logs, diffoscope
+output and attestations. The cleanup is disabled unless _keep_rebuilds_ or
+_max_rebuild_age_ is set. The most recent rebuild of every package is always
+kept, regardless of these settings. Freed space is reused by the database; to
+also shrink the file, convert it once with *PRAGMA auto_vacuum = INCREMENTAL;
+VACUUM;* while rebuilderd is stopped.
+
+_keep_rebuilds=_
+	Keep at most this many rebuilds per package, deleting older ones.
+
+_max_rebuild_age=_
+	Delete rebuilds older than this many days.
+
+_interval=_
+	How often to run the cleanup, in seconds. The default is 3600 (hourly).
+
 # EXAMPLE
 
 ```
@@ -111,6 +129,12 @@ _retry_delay_base=_
 ## recommended to set this to a high value like 168 (1 week) or higher.
 ## Successful rebuilds are not retried.
 #retry_delay_base = 24
+
+#[cleanup]
+## Keep at most this many rebuilds per package.
+#keep_rebuilds = 1
+## Delete rebuilds older than this many days.
+#max_rebuild_age = 30
 ```
 
 # SEE ALSO

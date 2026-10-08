@@ -1,6 +1,6 @@
 use rand::distr::{Alphanumeric, SampleString};
 use rebuilderd_common::auth;
-use rebuilderd_common::config::{ConfigFile, ScheduleConfig, WorkerConfig};
+use rebuilderd_common::config::{CleanupConfig, ConfigFile, ScheduleConfig, WorkerConfig};
 use rebuilderd_common::errors::*;
 use std::env;
 use std::fs;
@@ -20,6 +20,7 @@ pub struct Config {
     pub post_body_size_limit: usize,
     pub transparently_sign_attestations: bool,
     pub schedule: ScheduleConfig,
+    pub cleanup: CleanupConfig,
 }
 
 pub fn from_struct(config: ConfigFile, auth_cookie: String) -> Result<Config> {
@@ -45,6 +46,7 @@ pub fn from_struct(config: ConfigFile, auth_cookie: String) -> Result<Config> {
             .transparently_sign_attestations
             .unwrap_or(true),
         schedule: config.schedule,
+        cleanup: config.cleanup,
     })
 }
 

@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 
 pub mod api;
 pub mod attestation;
+pub mod cleanup;
 pub mod code_migrations;
 pub mod config;
 pub mod db;

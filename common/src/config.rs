@@ -16,6 +16,8 @@ pub const DEFAULT_RETRY_DELAY_BASE: i64 = 24;
 
 pub const DEFAULT_INITIAL_DELAY: i64 = 0;
 
+pub const DEFAULT_CLEANUP_INTERVAL: u64 = 3600;
+
 pub fn load<P: AsRef<Path>>(path: Option<P>) -> Result<ConfigFile> {
     let mut config = ConfigFile::default();
 
@@ -65,6 +67,8 @@ pub struct ConfigFile {
     pub worker: WorkerConfig,
     #[serde(default)]
     pub schedule: ScheduleConfig,
+    #[serde(default)]
+    pub cleanup: CleanupConfig,
 }
 
 impl ConfigFile {
@@ -80,6 +84,7 @@ impl ConfigFile {
         }
         self.worker.update(c.worker);
         self.schedule.update(c.schedule);
+        self.cleanup.update(c.cleanup);
     }
 }
 
@@ -168,5 +173,45 @@ impl ScheduleConfig {
 
     pub fn max_retries(&self) -> Option<i32> {
         self.max_retries
+    }
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct CleanupConfig {
+    pub interval: Option<u64>,
+    pub keep_rebuilds: Option<i64>,
+    pub max_rebuild_age: Option<i64>,
+}
+
+impl CleanupConfig {
+    pub fn update(&mut self, c: CleanupConfig) {
+        if c.interval.is_some() {
+            self.interval = c.interval;
+        }
+
+        if c.keep_rebuilds.is_some() {
+            self.keep_rebuilds = c.keep_rebuilds;
+        }
+
+        if c.max_rebuild_age.is_some() {
+            self.max_rebuild_age = c.max_rebuild_age;
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.keep_rebuilds.is_some() || self.max_rebuild_age.is_some()
+    }
+
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.interval.unwrap_or(DEFAULT_CLEANUP_INTERVAL))
+    }
+
+    /// The newest rebuild of a build input is always kept, regardless of age.
+    pub fn keep_rebuilds(&self) -> Option<i64> {
+        self.keep_rebuilds.map(|n| n.max(1))
+    }
+
+    pub fn max_rebuild_age(&self) -> Option<Duration> {
+        self.max_rebuild_age.map(Duration::days)
     }
 }
