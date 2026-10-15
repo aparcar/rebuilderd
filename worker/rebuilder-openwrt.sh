@@ -14,9 +14,10 @@
 # Must run as a non-root user (OpenWrt refuses to build as root).
 #
 # Inputs (from the worker):
-#   $1                 downloaded build input — content unused; identity only
+#   $1                 downloaded build input (the target's profiles.json)
 #   $2                 URL $1 was fetched from, under .../targets/<target>/<subtarget>/
-#                      — release, target and subtarget are parsed from its path
+#                      — release, target and subtarget are parsed from its path;
+#                      its ?version_code=... names the build this job is for
 #   REBUILDERD_OUTDIR  where to write rebuilt artifacts (the worker compares them)
 #
 # Env (optional):
@@ -49,6 +50,22 @@ if [ -z "$TARGET" ] || [ -z "$SUBTARGET" ]; then
     exit 1
 fi
 TS="$TARGET/$SUBTARGET"
+
+# --- make sure the published build is still the one this job is for ---
+# Snapshots are replaced in place: the worker downloads whatever is published
+# now, and openwrt-rebuilder rebuilds that too. If the build was replaced since
+# it was queued, comparing would attribute the newer artifacts to the old job.
+case "$INPUT_URL" in
+    *[?\&]version_code=*)
+        EXPECTED="${INPUT_URL#*version_code=}"
+        EXPECTED="${EXPECTED%%[&#]*}"
+        PUBLISHED=$(sed -n 's/.*"version_code" *: *"\([^"]*\)".*/\1/p' "$1" | head -n1)
+        if [ "$PUBLISHED" != "$EXPECTED" ]; then
+            echo "job is for $EXPECTED but $TS now publishes ${PUBLISHED:-no version_code}, not rebuilding a superseded build" >&2
+            exit 1
+        fi
+        ;;
+esac
 
 DL_DIR="${OPENWRT_DL_DIR:-$HOME/.cache/rebuilderd-openwrt-dl}"
 # Fresh scratch tree per build (reproducibility needs a clean checkout); removed after.

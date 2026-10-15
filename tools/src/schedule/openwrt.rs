@@ -115,6 +115,21 @@ fn build_version(version_number: &str, version_code: &str, release_name: &str) -
     }
 }
 
+// Build-input URL = profiles.json + the build code it is expected to carry.
+// Every snapshot roll is published under the same profiles.json URL, but the
+// daemon treats build inputs with the same URL as one ("friends"): they share
+// queue entries, results and retry counts, so a new roll would inherit the
+// previous one's result. The query makes each roll its own build input; the
+// download server ignores it, and the backend checks it against the
+// profiles.json it got, to reject jobs whose snapshot has been replaced.
+fn build_input_url(profiles_url: &str, version_code: &str) -> String {
+    if version_code.is_empty() {
+        profiles_url.to_string()
+    } else {
+        format!("{profiles_url}?version_code={version_code}")
+    }
+}
+
 // Component of the firmware images.
 const FIRMWARE: &str = "firmware";
 // Component of the target packages.
@@ -248,7 +263,7 @@ pub async fn sync(http: &http::Client, sync: &PkgsSync) -> Result<Vec<PackageRep
                     version: version.clone(),
                     // The worker backend derives target/subtarget/release from
                     // this URL (see rebuilder-openwrt.sh).
-                    url: profiles_url.clone(),
+                    url: build_input_url(&profiles_url, &profiles.version_code),
                     artifacts: artifacts.into_values().collect(),
                 }],
             });
@@ -315,6 +330,16 @@ mod tests {
         assert_eq!(build_version("25.12.4", "", "v25.12.4"), "25.12.4");
         // No version_number either -> derived from the release name.
         assert_eq!(build_version("", "", "v25.12.4"), "25.12.4");
+    }
+
+    #[test]
+    fn build_input_url_carries_version_code() {
+        let url = "https://downloads.openwrt.org/snapshots/targets/x86/64/profiles.json";
+        assert_eq!(
+            build_input_url(url, "r34845-193f1e3266"),
+            format!("{url}?version_code=r34845-193f1e3266")
+        );
+        assert_eq!(build_input_url(url, ""), url);
     }
 
     #[test]
